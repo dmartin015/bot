@@ -205,11 +205,17 @@ bot.command("estado", async (ctx) => {
   const msg = await ctx.reply("Comprobando addons y servicios, un momento...");
   const { results, skipped } = await checkAll(ADDONS);
   const { results: serviceResults } = await checkAllServices(SERVICES);
-  const lines = results.map((r) => `${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms${r.version ? ` (v${r.version})` : ""}` : r.error}`);
+  const lines = ["<b>— Addons —</b>"];
+  for (const r of results) lines.push(`${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms${r.version ? ` (v${r.version})` : ""}` : r.error}`);
   for (const s of skipped) lines.push(`⚪ ${s.name} — sin configurar`);
-  lines.push("— Servicios —");
-  for (const r of serviceResults) lines.push(`${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms` : r.error}`);
-  await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, lines.join("\n"));
+  for (const section of ["Servicios", "Aplicaciones"]) {
+    lines.push(`<b>— ${section} —</b>`);
+    for (const r of serviceResults) {
+      const svc = SERVICES.find((s) => s.name === r.name);
+      if (svc && svc.section === section) lines.push(`${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms` : r.error}`);
+    }
+  }
+  await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, lines.join("\n"), { parse_mode: "HTML" });
 });
 
 bot.command("reportar", async (ctx) => {
@@ -263,7 +269,7 @@ bot.command("comprobar", async (ctx) => {
 });
 
 bot.command("historial", (ctx) => {
-  const lines = [...ADDONS, ...SERVICES].map((a) => {
+  const historyLine = (a) => {
     const s = state[a.name];
     if (!s) return `⚪ ${a.name} — sin datos todavía`;
     if (!s.up && s.downSince) return `🔴 ${a.name} — caído desde ${s.downSince}`;
@@ -271,8 +277,13 @@ bot.command("historial", (ctx) => {
       return `• ${a.name} — última caída: ${s.lastDown.since} → ${s.lastDown.until}, duró ${formatDuration(s.lastDown.durationMin ?? 0)}`;
     }
     return `• ${a.name} — sin caídas registradas`;
-  });
-  ctx.reply("Historial de caídas:\n" + lines.join("\n"));
+  };
+  const lines = ["<b>— Addons —</b>", ...ADDONS.map(historyLine)];
+  for (const section of ["Servicios", "Aplicaciones"]) {
+    lines.push(`<b>— ${section} —</b>`);
+    for (const a of SERVICES.filter((s) => s.section === section)) lines.push(historyLine(a));
+  }
+  ctx.reply("Historial de caídas:\n" + lines.join("\n"), { parse_mode: "HTML" });
 });
 
 bot.launch().then(() => {
