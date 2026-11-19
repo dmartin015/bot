@@ -43,15 +43,12 @@ function now() {
   return new Date().toLocaleString("es-ES", { timeZone: "Europe/Madrid" });
 }
 
-// Log síncrono: console.log en Windows guarda la salida en un buffer
-// y no se ve hasta salir con CTRL+C. Escribiendo directo a stdout
-// con fs.writeSync, cada línea sale en vivo nada más escribirse.
+// Log por console.error: sale en vivo (stderr no se guarda en buffer
+// como stdout) y Node lo escribe con la codificación correcta de
+// Windows, así que emojis y acentos se ven bien. fs.writeSync salía
+// en vivo pero con los caracteres rotos en la consola de Windows.
 function log(...args) {
-  try {
-    fs.writeSync(1, args.map((a) => String(a)).join(" ") + "\n");
-  } catch {
-    console.log(...args);
-  }
+  console.error(...args);
 }
 
 function formatDuration(min) {
