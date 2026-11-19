@@ -85,8 +85,21 @@ function addonNames() {
 // Una pasada de vigilancia. Solo avisa cuando cambia el estado:
 // up -> down (tras FAILS_TO_ALERT fallos seguidos), down -> up,
 // o cuando un addon cambia de versión.
+// Si una revisión se queda colgada, la siguiente no se apila encima:
+// se salta y se deja constancia en la consola.
+let tickRunning = false;
 async function tick() {
+  if (tickRunning) {
+    console.log(`[${now()}] revisión anterior todavía en curso, salto esta.`);
+    return;
+  }
+  tickRunning = true;
+  console.log(`[${now()}] comprobando addons...`);
+  try {
   const { results, skipped } = await checkAll(ADDONS);
+  for (const r of results) {
+    console.log(`  ${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms${r.version ? ` (v${r.version})` : ""}` : r.error}`);
+  }
   let changed = false;
   for (const r of results) {
     const prev = state[r.name] || { up: true, fails: 0, downSince: null, downSinceTs: null, version: null, lastDown: null };
@@ -132,6 +145,11 @@ async function tick() {
   if (changed) saveState(state);
   const down = results.filter((r) => !r.up).map((r) => r.name);
   console.log(`[${now()}] revisión hecha. Caídos ahora: ${down.length ? down.join(", ") : "ninguno"}`);
+  } catch (err) {
+    console.error(`[${now()}] error en la revisión:`, err && err.message ? err.message : err);
+  } finally {
+    tickRunning = false;
+  }
 }
 
 // --- Comandos ---

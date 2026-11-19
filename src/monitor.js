@@ -6,9 +6,13 @@ const TIMEOUT_MS = 10_000;
 
 async function checkAddon(addon) {
   const started = Date.now();
+  // Timeout propio con AbortController: garantiza que ninguna petición
+  // se quede colgada más de TIMEOUT_MS, ni siquiera en Windows.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(addon.url, {
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: controller.signal,
       headers: { "User-Agent": "stremio-nuvio-bot/0.1 (monitor)" },
     });
     const ms = Date.now() - started;
@@ -20,16 +24,19 @@ async function checkAddon(addon) {
     return { name: addon.name, up: true, ms, version: json.version || null, manifestId: json.id, manifestName: json.name };
   } catch (err) {
     const ms = Date.now() - started;
-    const reason = err && err.name === "TimeoutError" ? "timeout 10s" : (err.message || "error de red");
+    const reason = err && (err.name === "TimeoutError" || err.name === "AbortError") ? "timeout 10s" : (err.message || "error de red");
     return { name: addon.name, up: false, ms, error: reason };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 async function checkAll(addons) {
   const configured = addons.filter((a) => a.url);
   const skipped = addons.filter((a) => !a.url);
-  const results = [];
-  for (const addon of configured) results.push(await checkAddon(addon));
+  // En paralelo: la revisión tarda lo del addon más lento, no la suma
+  // de los 10. Promise.all mantiene el orden de la lista.
+  const results = await Promise.all(configured.map((addon) => checkAddon(addon)));
   return { results, skipped };
 }
 
