@@ -1,7 +1,6 @@
 // Bot de Telegram — comunidad Stremio & Nuvio.
-// 1) Vigila los addons de src/addons.js y avisa en el canal cuando uno
-//    se cae y cuando se recupera.
-// 2) Responde en el grupo con los tutoriales de la GitBook.
+// Vigila los addons de src/addons.js y avisa en el canal cuando uno
+// se cae, cuando se recupera y cuando saca una versión nueva.
 //
 // El token NUNCA va en el código: va en .env como BOT_TOKEN.
 // El canal de avisos va en .env como ALERT_CHANNEL_ID.
@@ -10,7 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const { Telegraf } = require("telegraf");
 const ADDONS = require("./addons");
-const { checkAll } = require("./monitor");
+const { checkAddon, checkAll } = require("./monitor");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ALERT_CHANNEL_ID = process.env.ALERT_CHANNEL_ID; // ej. -1001234567890 o @canal
@@ -29,7 +28,7 @@ function loadState() {
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   } catch {
-    return {}; // nombre -> { up, fails, downSince }
+    return {}; // nombre -> { up, fails, downSince, downSinceTs, version, lastDown }
   }
 }
 function saveState(state) {
@@ -44,6 +43,14 @@ function now() {
   return new Date().toLocaleString("es-ES", { timeZone: "Europe/Madrid" });
 }
 
+function formatDuration(min) {
+  if (min < 1) return "menos de 1 min";
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
 async function sendAlert(text) {
   if (!ALERT_CHANNEL_ID) {
     console.warn("[alerta sin canal] ALERT_CHANNEL_ID no configurado:", text.replace(/\n/g, " | "));
@@ -52,22 +59,64 @@ async function sendAlert(text) {
   await bot.telegram.sendMessage(ALERT_CHANNEL_ID, text);
 }
 
+// Argumento de un comando: todo lo que va después de "/comando".
+// Quita también el "@nombrebot" si viene pegado al comando.
+function getArg(ctx) {
+  const parts = ctx.message.text.trim().split(/\s+/);
+  return parts.slice(1).join(" ").trim();
+}
+
+// Busca un addon por nombre (no hace falta escribirlo exacto).
+function findAddon(query) {
+  const q = query.toLowerCase().trim();
+  if (!q) return null;
+  return (
+    ADDONS.find((a) => a.name.toLowerCase() === q) ||
+    ADDONS.find((a) => a.name.toLowerCase().startsWith(q)) ||
+    ADDONS.find((a) => a.name.toLowerCase().includes(q)) ||
+    null
+  );
+}
+
+function addonNames() {
+  return ADDONS.map((a) => a.name).join(", ");
+}
+
 // Una pasada de vigilancia. Solo avisa cuando cambia el estado:
-// up -> down (tras FAILS_TO_ALERT fallos seguidos) o down -> up.
+// up -> down (tras FAILS_TO_ALERT fallos seguidos), down -> up,
+// o cuando un addon cambia de versión.
 async function tick() {
   const { results, skipped } = await checkAll(ADDONS);
   let changed = false;
   for (const r of results) {
-    const prev = state[r.name] || { up: true, fails: 0, downSince: null };
+    const prev = state[r.name] || { up: true, fails: 0, downSince: null, downSinceTs: null, version: null, lastDown: null };
     if (r.up) {
       if (!prev.up) {
+        // Recuperación: guarda la caída en el historial.
+        const durationMin = prev.downSinceTs ? Math.max(0, Math.round((Date.now() - prev.downSinceTs) / 60000)) : null;
+        state[r.name] = {
+          up: true,
+          fails: 0,
+          downSince: null,
+          downSinceTs: null,
+          version: r.version || prev.version || null,
+          lastDown: prev.downSince
+            ? { since: prev.downSince, until: now(), durationMin }
+            : prev.lastDown || null,
+        };
         await sendAlert(`🟢 ${r.name} vuelve a estar online\nRecuperado: ${now()}\nTiempo de respuesta: ${r.ms} ms`);
+      } else {
+        // Sigue online: avisa solo si ha cambiado de versión.
+        if (prev.version && r.version && prev.version !== r.version) {
+          await sendAlert(`🆕 ${r.name} nueva versión\nAntes: v${prev.version}\nAhora: v${r.version}`);
+        }
+        state[r.name] = { ...prev, up: true, fails: 0, downSince: null, downSinceTs: null, version: r.version || prev.version || null };
       }
-      state[r.name] = { up: true, fails: 0, downSince: null };
     } else {
       const fails = (prev.up ? 0 : prev.fails) + 1;
       const downSince = prev.up ? now() : prev.downSince;
-      state[r.name] = { up: prev.up, fails, downSince };
+      const downSinceTs = prev.up ? Date.now() : prev.downSinceTs;
+      state[r.name] = { ...prev, up: prev.up, fails, downSince, downSinceTs };
       if (prev.up && fails >= FAILS_TO_ALERT) {
         state[r.name].up = false;
         await sendAlert(
@@ -86,48 +135,139 @@ async function tick() {
 }
 
 // --- Comandos ---
+const HELP_TEXT =
+  "/estado [addon] - comprueba ahora mismo si los addons están online (o solo uno)\n" +
+  "/reportar <addon> - avisa de que un addon te falla y lo compruebo al momento\n" +
+  "/comprobar <enlace> - dice si un manifest funciona o no\n" +
+  "/historial - última caída de cada addon y cuánto duró";
+
 bot.start((ctx) =>
-  ctx.reply(
-    "Bienvenido a la comunidad de Stremio & Nuvio.\n\n" +
-      "Tutoriales: " + TUTORIALES + "\n" +
-      "Comandos: /tutoriales /sinopsis /addons /estado /ayuda"
-  )
+  ctx.reply("Bienvenido a la comunidad de Stremio & Nuvio.\n\nTutoriales: " + TUTORIALES + "\nComandos:\n" + HELP_TEXT)
 );
-bot.help((ctx) =>
-  ctx.reply(
-    "/tutoriales - web con todas las guías\n" +
-      "/sinopsis - cómo ver las sinopsis en español\n" +
-      "/addons - lista de addons que vigilo\n" +
-      "/estado - comprueba ahora mismo si los addons están online"
-  )
-);
-bot.command("tutoriales", (ctx) => ctx.reply("Todas las guías están aquí:\n" + TUTORIALES));
-bot.command("addons", (ctx) =>
-  ctx.reply("Addons que vigilo:\n" + ADDONS.map((a) => `• ${a.name}${a.url ? "" : " (sin configurar)"}`).join("\n"))
-);
-bot.command("sinopsis", (ctx) =>
-  ctx.reply(
-    "Si las sinopsis te salen en inglés es por Cinemeta, que no deja elegir idioma.\n\n" +
-      "1. Instala un addon de metadatos/catálogos: TMDB es el principal, también valen AIOMetadata o XPerience.\n" +
-      "2. En su configuración pon el idioma en español y guarda. TMDB pide su clave gratuita.\n" +
-      "3. Ponlo primero en la lista y deja Cinemeta abajo solo de respaldo.\n\n" +
-      "Guía completa: " + TUTORIALES
-  )
-);
+bot.help((ctx) => ctx.reply(HELP_TEXT));
+
 bot.command("estado", async (ctx) => {
+  const arg = getArg(ctx);
+  if (arg) {
+    const addon = findAddon(arg);
+    if (!addon) return ctx.reply(`No conozco ese addon. Los que vigilo son: ${addonNames()}`);
+    const msg = await ctx.reply(`Comprobando ${addon.name}, un momento...`);
+    const r = await checkAddon(addon);
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      msg.message_id,
+      undefined,
+      r.up
+        ? `🟢 ${r.name} — ${r.ms} ms${r.version ? ` (v${r.version})` : ""}`
+        : `🔴 ${r.name} — ${r.error}`
+    );
+    return;
+  }
   const msg = await ctx.reply("Comprobando los addons, un momento...");
   const { results, skipped } = await checkAll(ADDONS);
-  const lines = results.map((r) => `${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms` : r.error}`);
+  const lines = results.map((r) => `${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms${r.version ? ` (v${r.version})` : ""}` : r.error}`);
   for (const s of skipped) lines.push(`⚪ ${s.name} — sin configurar`);
   await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, lines.join("\n"));
 });
 
-// Respuestas automáticas a las dudas que más se repiten en el grupo.
-bot.hears(/sinopsis en ingl[eé]s/i, (ctx) =>
-  ctx.reply("Eso es Cinemeta. Usa /sinopsis para arreglarlo, es el mismo paso sea cual sea el addon.")
+bot.command("reportar", async (ctx) => {
+  const arg = getArg(ctx);
+  if (!arg) {
+    return ctx.reply(`¿Qué addon te falla? Usa /reportar <nombre>, por ejemplo /reportar Torrentio.\nLos que vigilo son: ${addonNames()}`);
+  }
+  const addon = findAddon(arg);
+  if (!addon) return ctx.reply(`No conozco ese addon. Los que vigilo son: ${addonNames()}`);
+  const msg = await ctx.reply(`Comprobando ${addon.name}, un momento...`);
+  const r = await checkAddon(addon);
+  await ctx.telegram.editMessageText(
+    ctx.chat.id,
+    msg.message_id,
+    undefined,
+    r.up
+      ? `🟢 ${r.name} está online ahora mismo (${r.ms} ms). Si a ti te falla, revisa tu configuración del addon o tu conexión.`
+      : `🔴 Confirmado: ${r.name} está caído ahora mismo (${r.error}). Lo sigo vigilando y aviso en el canal cuando vuelva.`
+  );
+});
+
+bot.command("comprobar", async (ctx) => {
+  const arg = getArg(ctx);
+  if (!arg) {
+    return ctx.reply("Pásame el enlace del manifest, por ejemplo:\n/comprobar https://ejemplo.com/manifest.json");
+  }
+  let url = arg.trim();
+  if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return ctx.reply("Ese enlace no vale, revisa que sea una URL con http:// o https://");
+  }
+  // Si es la web del addon o el /configure, busca el manifest.
+  let manifestUrl = parsed.href.replace(/\/+$/, "");
+  if (manifestUrl.endsWith("/configure")) manifestUrl = manifestUrl.slice(0, -"/configure".length);
+  if (!manifestUrl.endsWith("/manifest.json")) manifestUrl += "/manifest.json";
+
+  const msg = await ctx.reply("Comprobando ese manifest, un momento...");
+  const r = await checkAddon({ name: parsed.host, url: manifestUrl });
+  await ctx.telegram.editMessageText(
+    ctx.chat.id,
+    msg.message_id,
+    undefined,
+    r.up
+      ? `🟢 El manifest funciona\nNombre: ${r.manifestName}\nID: ${r.manifestId}\nVersión: ${r.version || "sin versión"}\nTiempo: ${r.ms} ms\nURL: ${manifestUrl}`
+      : `🔴 Ese manifest no funciona\nURL: ${manifestUrl}\nError: ${r.error}`
+  );
+});
+
+bot.command("historial", (ctx) => {
+  const lines = ADDONS.map((a) => {
+    const s = state[a.name];
+    if (!s) return `⚪ ${a.name} — sin datos todavía`;
+    if (!s.up && s.downSince) return `🔴 ${a.name} — caído desde ${s.downSince}`;
+    if (s.lastDown) {
+      return `• ${a.name} — última caída: ${s.lastDown.since} → ${s.lastDown.until}, duró ${formatDuration(s.lastDown.durationMin ?? 0)}`;
+    }
+    return `• ${a.name} — sin caídas registradas`;
+  });
+  ctx.reply("Historial de caídas:\n" + lines.join("\n"));
+});
+
+// Respuestas automáticas a los fallos típicos en el grupo.
+bot.hears(/buffering|se queda cargando|se congela|va a tirones|se para cada (dos por tres|poco)/i, (ctx) =>
+  ctx.reply(
+    "Si se te queda cargando o va a tirones, prueba esto:\n" +
+      "1. Baja la calidad del vídeo y prueba otro enlace.\n" +
+      "2. Si usas Debrid, revisa que no esté caducado.\n" +
+      "3. Reinicia Stremio y el router.\n" +
+      "Guías: " + TUTORIALES
+  )
 );
-bot.hears(/cinemeta/i, (ctx) =>
-  ctx.reply("Cinemeta no deja elegir idioma. Instala TMDB (o AIOMetadata / XPerience), ponlo en español y déjalo primero. Más en /sinopsis.")
+bot.hears(/sin audio|no se escucha|sin sonido|no tiene sonido/i, (ctx) =>
+  ctx.reply(
+    "Si no se escucha, prueba esto:\n" +
+      "1. Cambia la pista de audio en el reproductor.\n" +
+      "2. Prueba otro enlace de la misma peli o serie.\n" +
+      "3. Revisa el volumen del dispositivo y de Stremio.\n" +
+      "Guías: " + TUTORIALES
+  )
+);
+bot.hears(/sin subt[ií]tulos|subt[ií]tulos no|no salen los subt[ií]tulos|subt[ií]tulos en espa[ñn]ol/i, (ctx) =>
+  ctx.reply(
+    "Si no te salen los subtítulos, prueba esto:\n" +
+      "1. En el reproductor, abre subtítulos y elige español.\n" +
+      "2. Revisa que tengas un addon de subtítulos instalado.\n" +
+      "3. Prueba otro enlace, no todos traen subtítulos.\n" +
+      "Guías: " + TUTORIALES
+  )
+);
+bot.hears(/no carga nada|no me carga|no carga|pantalla en negro|no sale nada/i, (ctx) =>
+  ctx.reply(
+    "Si no te carga nada, prueba esto:\n" +
+      "1. Revisa que el addon esté instalado y configurado.\n" +
+      "2. Cierra Stremio del todo y vuelve a abrirlo.\n" +
+      "3. Prueba con otro addon o con /estado para ver si está caído.\n" +
+      "Guías: " + TUTORIALES
+  )
 );
 
 bot.launch().then(() => {

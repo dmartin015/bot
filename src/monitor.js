@@ -17,7 +17,7 @@ async function checkAddon(addon) {
     if (!json || typeof json !== "object" || !json.id || !json.name) {
       return { name: addon.name, up: false, ms, error: "manifest sin id/name" };
     }
-    return { name: addon.name, up: true, ms, version: json.version || null };
+    return { name: addon.name, up: true, ms, version: json.version || null, manifestId: json.id, manifestName: json.name };
   } catch (err) {
     const ms = Date.now() - started;
     const reason = err && err.name === "TimeoutError" ? "timeout 10s" : (err.message || "error de red");
