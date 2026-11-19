@@ -9,7 +9,8 @@ const fs = require("fs");
 const path = require("path");
 const { Telegraf } = require("telegraf");
 const ADDONS = require("./addons");
-const { checkAddon, checkAll } = require("./monitor");
+const SERVICES = require("./services");
+const { checkAddon, checkAll, checkService, checkAllServices } = require("./monitor");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ALERT_CHANNEL_ID = process.env.ALERT_CHANNEL_ID; // ej. -1001234567890 o @canal
@@ -43,12 +44,19 @@ function now() {
   return new Date().toLocaleString("es-ES", { timeZone: "Europe/Madrid" });
 }
 
-// Log por console.error: sale en vivo (stderr no se guarda en buffer
-// como stdout) y Node lo escribe con la codificación correcta de
-// Windows, así que emojis y acentos se ven bien. fs.writeSync salía
-// en vivo pero con los caracteres rotos en la consola de Windows.
+// Log por console.error y además en data/bot.log: la consola de
+// Windows guarda la salida hasta salir con CTRL+C, así que el archivo
+// es la forma de ver los logs en vivo siempre, da igual la terminal.
+const LOG_FILE = path.join(__dirname, "..", "data", "bot.log");
 function log(...args) {
-  console.error(...args);
+  const line = args.map((a) => String(a)).join(" ");
+  console.error(line);
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fs.appendFileSync(LOG_FILE, line + "\n", "utf8");
+  } catch {
+    // Si no se puede escribir el archivo, la consola ya lo ha mostrado.
+  }
 }
 
 function formatDuration(min) {
@@ -74,20 +82,22 @@ function getArg(ctx) {
   return parts.slice(1).join(" ").trim();
 }
 
-// Busca un addon por nombre (no hace falta escribirlo exacto).
-function findAddon(query) {
+// Busca un addon o un servicio por nombre (no hace falta escribirlo exacto).
+function findItem(query) {
   const q = query.toLowerCase().trim();
   if (!q) return null;
-  return (
-    ADDONS.find((a) => a.name.toLowerCase() === q) ||
-    ADDONS.find((a) => a.name.toLowerCase().startsWith(q)) ||
-    ADDONS.find((a) => a.name.toLowerCase().includes(q)) ||
-    null
-  );
+  const list = [...ADDONS, ...SERVICES];
+  const item =
+    list.find((a) => a.name.toLowerCase() === q) ||
+    list.find((a) => a.name.toLowerCase().startsWith(q)) ||
+    list.find((a) => a.name.toLowerCase().includes(q)) ||
+    null;
+  if (!item) return null;
+  return { item, kind: ADDONS.includes(item) ? "addon" : "service" };
 }
 
-function addonNames() {
-  return ADDONS.map((a) => a.name).join(", ");
+function watchedNames() {
+  return [...ADDONS, ...SERVICES].map((a) => a.name).join(", ");
 }
 
 // Una pasada de vigilancia. Solo avisa cuando cambia el estado:
@@ -102,9 +112,11 @@ async function tick() {
     return;
   }
   tickRunning = true;
-  log(`[${now()}] comprobando addons...`);
+  log(`[${now()}] comprobando addons y servicios...`);
   try {
-  const { results, skipped } = await checkAll(ADDONS);
+  const { results: addonResults, skipped } = await checkAll(ADDONS);
+  const { results: serviceResults } = await checkAllServices(SERVICES);
+  const results = [...addonResults, ...serviceResults];
   for (const r of results) {
     log(`  ${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms${r.version ? ` (v${r.version})` : ""}` : r.error}`);
   }
@@ -162,10 +174,10 @@ async function tick() {
 
 // --- Comandos ---
 const HELP_TEXT =
-  "/estado [addon] - comprueba ahora mismo si los addons están online (o solo uno)\n" +
-  "/reportar <addon> - avisa de que un addon te falla y lo compruebo al momento\n" +
+  "/estado [nombre] - comprueba ahora mismo si están online (o solo uno)\n" +
+  "/reportar <nombre> - avisa de que algo te falla y lo compruebo al momento\n" +
   "/comprobar <enlace> - dice si un manifest funciona o no\n" +
-  "/historial - última caída de cada addon y cuánto duró";
+  "/historial - última caída de cada addon y servicio, y cuánto duró";
 
 bot.start((ctx) =>
   ctx.reply("Bienvenido a la comunidad de Stremio & Nuvio.\n\nTutoriales: " + TUTORIALES + "\nComandos:\n" + HELP_TEXT)
@@ -175,10 +187,11 @@ bot.help((ctx) => ctx.reply(HELP_TEXT));
 bot.command("estado", async (ctx) => {
   const arg = getArg(ctx);
   if (arg) {
-    const addon = findAddon(arg);
-    if (!addon) return ctx.reply(`No conozco ese addon. Los que vigilo son: ${addonNames()}`);
-    const msg = await ctx.reply(`Comprobando ${addon.name}, un momento...`);
-    const r = await checkAddon(addon);
+    const found = findItem(arg);
+    if (!found) return ctx.reply(`No conozco ese nombre. Los que vigilo son: ${watchedNames()}`);
+    const { item, kind } = found;
+    const msg = await ctx.reply(`Comprobando ${item.name}, un momento...`);
+    const r = kind === "addon" ? await checkAddon(item) : await checkService(item);
     await ctx.telegram.editMessageText(
       ctx.chat.id,
       msg.message_id,
@@ -189,28 +202,32 @@ bot.command("estado", async (ctx) => {
     );
     return;
   }
-  const msg = await ctx.reply("Comprobando los addons, un momento...");
+  const msg = await ctx.reply("Comprobando addons y servicios, un momento...");
   const { results, skipped } = await checkAll(ADDONS);
+  const { results: serviceResults } = await checkAllServices(SERVICES);
   const lines = results.map((r) => `${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms${r.version ? ` (v${r.version})` : ""}` : r.error}`);
   for (const s of skipped) lines.push(`⚪ ${s.name} — sin configurar`);
+  lines.push("— Servicios —");
+  for (const r of serviceResults) lines.push(`${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms` : r.error}`);
   await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, lines.join("\n"));
 });
 
 bot.command("reportar", async (ctx) => {
   const arg = getArg(ctx);
   if (!arg) {
-    return ctx.reply(`¿Qué addon te falla? Usa /reportar <nombre>, por ejemplo /reportar Torrentio.\nLos que vigilo son: ${addonNames()}`);
+    return ctx.reply(`¿Qué te falla? Usa /reportar <nombre>, por ejemplo /reportar Torrentio.\nLos que vigilo son: ${watchedNames()}`);
   }
-  const addon = findAddon(arg);
-  if (!addon) return ctx.reply(`No conozco ese addon. Los que vigilo son: ${addonNames()}`);
-  const msg = await ctx.reply(`Comprobando ${addon.name}, un momento...`);
-  const r = await checkAddon(addon);
+  const found = findItem(arg);
+  if (!found) return ctx.reply(`No conozco ese nombre. Los que vigilo son: ${watchedNames()}`);
+  const { item, kind } = found;
+  const msg = await ctx.reply(`Comprobando ${item.name}, un momento...`);
+  const r = kind === "addon" ? await checkAddon(item) : await checkService(item);
   await ctx.telegram.editMessageText(
     ctx.chat.id,
     msg.message_id,
     undefined,
     r.up
-      ? `🟢 ${r.name} está online ahora mismo (${r.ms} ms). Si a ti te falla, revisa tu configuración del addon o tu conexión.`
+      ? `🟢 ${r.name} está online ahora mismo (${r.ms} ms). Si a ti te falla, revisa tu configuración o tu conexión.`
       : `🔴 Confirmado: ${r.name} está caído ahora mismo (${r.error}). Lo sigo vigilando y aviso en el canal cuando vuelva.`
   );
 });
@@ -246,7 +263,7 @@ bot.command("comprobar", async (ctx) => {
 });
 
 bot.command("historial", (ctx) => {
-  const lines = ADDONS.map((a) => {
+  const lines = [...ADDONS, ...SERVICES].map((a) => {
     const s = state[a.name];
     if (!s) return `⚪ ${a.name} — sin datos todavía`;
     if (!s.up && s.downSince) return `🔴 ${a.name} — caído desde ${s.downSince}`;

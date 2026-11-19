@@ -57,4 +57,43 @@ async function checkAll(addons) {
   return { results, skipped };
 }
 
-module.exports = { checkAddon, checkAll, TIMEOUT_MS };
+// Comprobación de un servicio (Debrid, Stremio, Nuvio...): basta con
+// que su API o su web responda 200. No tiene manifest ni versión.
+// Misma regla que los addons: uno a uno, 20 s por intento y 1 reintento.
+async function checkService(service) {
+  const started = Date.now();
+  let lastError = "error de red";
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch(service.url, {
+        signal: controller.signal,
+        headers: { "User-Agent": "stremio-nuvio-bot/0.1 (monitor)" },
+      });
+      const ms = Date.now() - started;
+      if (!res.ok) {
+        lastError = `HTTP ${res.status}`;
+      } else {
+        return { name: service.name, up: true, ms, version: null };
+      }
+    } catch (err) {
+      lastError =
+        err && (err.name === "TimeoutError" || err.name === "AbortError")
+          ? "timeout 20s"
+          : err.message || "error de red";
+    } finally {
+      clearTimeout(timer);
+    }
+    if (attempt === 1) await sleep(RETRY_DELAY_MS);
+  }
+  return { name: service.name, up: false, ms: Date.now() - started, error: lastError };
+}
+
+async function checkAllServices(services) {
+  const results = [];
+  for (const service of services) results.push(await checkService(service));
+  return { results };
+}
+
+module.exports = { checkAddon, checkAll, checkService, checkAllServices, TIMEOUT_MS };
