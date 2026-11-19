@@ -43,6 +43,17 @@ function now() {
   return new Date().toLocaleString("es-ES", { timeZone: "Europe/Madrid" });
 }
 
+// Log síncrono: console.log en Windows guarda la salida en un buffer
+// y no se ve hasta salir con CTRL+C. Escribiendo directo a stdout
+// con fs.writeSync, cada línea sale en vivo nada más escribirse.
+function log(...args) {
+  try {
+    fs.writeSync(1, args.map((a) => String(a)).join(" ") + "\n");
+  } catch {
+    console.log(...args);
+  }
+}
+
 function formatDuration(min) {
   if (min < 1) return "menos de 1 min";
   if (min < 60) return `${min} min`;
@@ -90,15 +101,15 @@ function addonNames() {
 let tickRunning = false;
 async function tick() {
   if (tickRunning) {
-    console.log(`[${now()}] revisión anterior todavía en curso, salto esta.`);
+    log(`[${now()}] revisión anterior todavía en curso, salto esta.`);
     return;
   }
   tickRunning = true;
-  console.log(`[${now()}] comprobando addons...`);
+  log(`[${now()}] comprobando addons...`);
   try {
   const { results, skipped } = await checkAll(ADDONS);
   for (const r of results) {
-    console.log(`  ${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms${r.version ? ` (v${r.version})` : ""}` : r.error}`);
+    log(`  ${r.up ? "🟢" : "🔴"} ${r.name} — ${r.up ? `${r.ms} ms${r.version ? ` (v${r.version})` : ""}` : r.error}`);
   }
   let changed = false;
   for (const r of results) {
@@ -140,11 +151,11 @@ async function tick() {
     if (JSON.stringify(state[r.name]) !== JSON.stringify(prev)) changed = true;
   }
   if (skipped.length) {
-    console.log("Sin configurar (sin URL de manifest):", skipped.map((s) => s.name).join(", "));
+    log("Sin configurar (sin URL de manifest):", skipped.map((s) => s.name).join(", "));
   }
   if (changed) saveState(state);
   const down = results.filter((r) => !r.up).map((r) => r.name);
-  console.log(`[${now()}] revisión hecha. Caídos ahora: ${down.length ? down.join(", ") : "ninguno"}`);
+  log(`[${now()}] revisión hecha. Caídos ahora: ${down.length ? down.join(", ") : "ninguno"}`);
   } catch (err) {
     console.error(`[${now()}] error en la revisión:`, err && err.message ? err.message : err);
   } finally {
@@ -251,7 +262,7 @@ bot.command("historial", (ctx) => {
 });
 
 bot.launch().then(() => {
-  console.log("Bot arrancado. Revisión cada", CHECK_INTERVAL_MIN, "minutos.");
+  log("Bot arrancado. Revisión cada", CHECK_INTERVAL_MIN, "minutos.");
   tick(); // primera revisión al arrancar
   setInterval(tick, CHECK_INTERVAL_MIN * 60 * 1000);
 });
