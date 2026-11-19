@@ -232,44 +232,6 @@ bot.command("historial", (ctx) => {
   ctx.reply("Historial de caídas:\n" + lines.join("\n"));
 });
 
-// Respuestas automáticas a los fallos típicos en el grupo.
-bot.hears(/buffering|se queda cargando|se congela|va a tirones|se para cada (dos por tres|poco)/i, (ctx) =>
-  ctx.reply(
-    "Si se te queda cargando o va a tirones, prueba esto:\n" +
-      "1. Baja la calidad del vídeo y prueba otro enlace.\n" +
-      "2. Si usas Debrid, revisa que no esté caducado.\n" +
-      "3. Reinicia Stremio y el router.\n" +
-      "Guías: " + TUTORIALES
-  )
-);
-bot.hears(/sin audio|no se escucha|sin sonido|no tiene sonido/i, (ctx) =>
-  ctx.reply(
-    "Si no se escucha, prueba esto:\n" +
-      "1. Cambia la pista de audio en el reproductor.\n" +
-      "2. Prueba otro enlace de la misma peli o serie.\n" +
-      "3. Revisa el volumen del dispositivo y de Stremio.\n" +
-      "Guías: " + TUTORIALES
-  )
-);
-bot.hears(/sin subt[ií]tulos|subt[ií]tulos no|no salen los subt[ií]tulos|subt[ií]tulos en espa[ñn]ol/i, (ctx) =>
-  ctx.reply(
-    "Si no te salen los subtítulos, prueba esto:\n" +
-      "1. En el reproductor, abre subtítulos y elige español.\n" +
-      "2. Revisa que tengas un addon de subtítulos instalado.\n" +
-      "3. Prueba otro enlace, no todos traen subtítulos.\n" +
-      "Guías: " + TUTORIALES
-  )
-);
-bot.hears(/no carga nada|no me carga|no carga|pantalla en negro|no sale nada/i, (ctx) =>
-  ctx.reply(
-    "Si no te carga nada, prueba esto:\n" +
-      "1. Revisa que el addon esté instalado y configurado.\n" +
-      "2. Cierra Stremio del todo y vuelve a abrirlo.\n" +
-      "3. Prueba con otro addon o con /estado para ver si está caído.\n" +
-      "Guías: " + TUTORIALES
-  )
-);
-
 bot.launch().then(() => {
   console.log("Bot arrancado. Revisión cada", CHECK_INTERVAL_MIN, "minutos.");
   tick(); // primera revisión al arrancar
