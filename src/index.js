@@ -69,10 +69,11 @@ function formatDuration(min) {
 
 async function sendAlert(text) {
   if (!ALERT_CHANNEL_ID) {
-    console.warn("[alerta sin canal] ALERT_CHANNEL_ID no configurado:", text.replace(/\n/g, " | "));
-    return;
+    log("[alerta sin canal] ALERT_CHANNEL_ID no configurado:", text.replace(/\n/g, " | "));
+    return false;
   }
   await bot.telegram.sendMessage(ALERT_CHANNEL_ID, text);
+  return true;
 }
 
 // Argumento de un comando: todo lo que va después de "/comando".
@@ -123,16 +124,26 @@ async function tick() {
   let changed = false;
   for (const r of results) {
     const prev = state[r.name] || { up: true, fails: 0, downSince: null, downSinceTs: null, version: null, lastDown: null };
+    // Normaliza entradas antiguas: desde cuándo se vigila y el
+    // historial de caídas (para /uptime). Se guarda en state.json.
+    if (!prev.firstSeenTs) prev.firstSeenTs = Date.now();
+    if (!Array.isArray(prev.downtime)) prev.downtime = [];
     if (r.up) {
       if (!prev.up) {
         // Recuperación: guarda la caída en el historial.
         const durationMin = prev.downSinceTs ? Math.max(0, Math.round((Date.now() - prev.downSinceTs) / 60000)) : null;
+        const downtime = [...prev.downtime];
+        if (prev.downSinceTs) downtime.push({ sinceTs: prev.downSinceTs, untilTs: Date.now() });
+        const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        const pruned = downtime.filter((d) => d.untilTs >= cutoff).slice(-100);
         state[r.name] = {
           up: true,
           fails: 0,
           downSince: null,
           downSinceTs: null,
           version: r.version || prev.version || null,
+          firstSeenTs: prev.firstSeenTs,
+          downtime: pruned,
           lastDown: prev.downSince
             ? { since: prev.downSince, until: now(), durationMin }
             : prev.lastDown || null,
@@ -172,12 +183,43 @@ async function tick() {
   }
 }
 
+// % de tiempo online de un addon/servicio en los últimos `days` días,
+// contando solo desde que se empezó a vigilar (firstSeenTs). Las caídas
+// cerradas están en state[name].downtime; si está caído ahora, la caída
+// abierta también cuenta hasta este momento.
+function uptimePct(name, days) {
+  const s = state[name];
+  if (!s || !s.firstSeenTs) return null;
+  const nowTs = Date.now();
+  const windowStart = nowTs - days * 24 * 60 * 60 * 1000;
+  const observedStart = Math.max(windowStart, s.firstSeenTs);
+  const observedMs = nowTs - observedStart;
+  if (observedMs <= 0) return null;
+  let downMs = 0;
+  for (const d of s.downtime || []) {
+    const a = Math.max(d.sinceTs, observedStart);
+    const b = Math.min(d.untilTs, nowTs);
+    if (b > a) downMs += b - a;
+  }
+  if (!s.up && s.downSinceTs) {
+    const a = Math.max(s.downSinceTs, observedStart);
+    if (nowTs > a) downMs += nowTs - a;
+  }
+  return { pct: Math.max(0, 100 * (1 - downMs / observedMs)), observedMs };
+}
+
+function fmtPct(p) {
+  return p.toFixed(1).replace(".", ",") + "%";
+}
+
 // --- Comandos ---
 const HELP_TEXT =
   "/estado [nombre] - comprueba ahora mismo si están online (o solo uno)\n" +
   "/reportar <nombre> - avisa de que algo te falla y lo compruebo al momento\n" +
   "/comprobar <enlace> - dice si un manifest funciona o no\n" +
-  "/historial - última caída de cada addon y servicio, y cuánto duró";
+  "/historial - última caída de cada addon y servicio, y cuánto duró\n" +
+  "/uptime - % de tiempo online de cada uno en los últimos 7 y 30 días\n" +
+  "/probaralerta [nombre] - manda un aviso de prueba al canal";
 
 bot.start((ctx) =>
   ctx.reply("Bienvenido a la comunidad de Stremio & Nuvio.\n\nTutoriales: " + TUTORIALES + "\nComandos:\n" + HELP_TEXT)
@@ -284,6 +326,52 @@ bot.command("historial", (ctx) => {
     for (const a of SERVICES.filter((s) => s.section === section)) lines.push(historyLine(a));
   }
   ctx.reply("Historial de caídas:\n" + lines.join("\n"), { parse_mode: "HTML" });
+});
+
+bot.command("uptime", (ctx) => {
+  const uptimeLine = (a) => {
+    const s = state[a.name];
+    const u7 = uptimePct(a.name, 7);
+    const u30 = uptimePct(a.name, 30);
+    if (!s || !u7 || !u30) return `⚪ ${a.name} — sin datos todavía`;
+    const icon = s.up ? "🟢" : "🔴";
+    // Si se vigila desde hace menos de 30 días, el % de 30 días es
+    // sobre lo observado, no sobre 30 días completos: se avisa.
+    const note = u30.observedMs < 30 * 24 * 60 * 60 * 1000
+      ? ` (datos desde hace ${formatDuration(Math.round(u30.observedMs / 60000))})`
+      : "";
+    return `${icon} ${a.name} — 7 días: ${fmtPct(u7.pct)} · 30 días: ${fmtPct(u30.pct)}${note}`;
+  };
+  const lines = ["<b>— Addons —</b>", ...ADDONS.map(uptimeLine)];
+  for (const section of ["Servicios", "Aplicaciones"]) {
+    lines.push(`<b>— ${section} —</b>`);
+    for (const a of SERVICES.filter((s) => s.section === section)) lines.push(uptimeLine(a));
+  }
+  ctx.reply("Tiempo online:\n" + lines.join("\n"), { parse_mode: "HTML" });
+});
+
+bot.command("probaralerta", async (ctx) => {
+  if (!ALERT_CHANNEL_ID) {
+    return ctx.reply("No hay canal de avisos configurado. Pon ALERT_CHANNEL_ID en el .env y reinicia el bot.");
+  }
+  const arg = getArg(ctx);
+  let name = null;
+  if (arg) {
+    const found = findItem(arg);
+    if (!found) return ctx.reply(`No conozco ese nombre. Los que vigilo son: ${watchedNames()}`);
+    name = found.item.name;
+  }
+  const text = name
+    ? `🔴 PRUEBA — ${name} está caído\nEsto es solo una prueba, ${name} NO está caído de verdad. Si ves este mensaje en el canal, los avisos llegan bien.`
+    : "🔔 PRUEBA DE AVISO\nEsto es solo una prueba. Si ves este mensaje en el canal, los avisos llegan bien.";
+  try {
+    const ok = await sendAlert(text);
+    if (!ok) return ctx.reply("No hay canal de avisos configurado. Pon ALERT_CHANNEL_ID en el .env y reinicia el bot.");
+    return ctx.reply("Prueba enviada al canal. Mira si ha llegado.");
+  } catch (err) {
+    log("Error al enviar la prueba de aviso:", err && err.message ? err.message : err);
+    return ctx.reply(`No se pudo enviar la prueba al canal: ${err && err.message ? err.message : err}`);
+  }
 });
 
 bot.launch().then(() => {
