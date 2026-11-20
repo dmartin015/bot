@@ -14,6 +14,17 @@ const { checkAddon, checkAll, checkService, checkAllServices } = require("./moni
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ALERT_CHANNEL_ID = process.env.ALERT_CHANNEL_ID; // ej. -1001234567890 o @canal
+// Si el grupo tiene temas, el aviso debe ir a un tema concreto, no a
+// General. Se indica pegando el ID del tema tras un guion bajo:
+// ALERT_CHANNEL_ID=-1001234567890_158621  (o con ALERT_THREAD_ID=158621).
+// Telegram ignora ese sufijo si va dentro del chat_id, por eso antes
+// llegaba a General: hay que pasarlo aparte como message_thread_id.
+const ALERT_THREAD_ID = (() => {
+  if (process.env.ALERT_THREAD_ID) return Number(process.env.ALERT_THREAD_ID);
+  const parts = String(ALERT_CHANNEL_ID || "").split("_");
+  return parts.length > 1 ? Number(parts[1]) : null;
+})();
+const ALERT_CHAT_ID = String(ALERT_CHANNEL_ID || "").split("_")[0];
 const CHECK_INTERVAL_MIN = Number(process.env.CHECK_INTERVAL_MINUTES || 5);
 const FAILS_TO_ALERT = Number(process.env.FAILS_TO_ALERT || 2); // fallos seguidos para avisar
 const TUTORIALES = "https://stremio-and-nuvio-esp.gitbook.io/";
@@ -72,7 +83,8 @@ async function sendAlert(text) {
     log("[alerta sin canal] ALERT_CHANNEL_ID no configurado:", text.replace(/\n/g, " | "));
     return false;
   }
-  await bot.telegram.sendMessage(ALERT_CHANNEL_ID, text);
+  const extra = ALERT_THREAD_ID ? { message_thread_id: ALERT_THREAD_ID } : {};
+  await bot.telegram.sendMessage(ALERT_CHAT_ID, text, extra);
   return true;
 }
 
